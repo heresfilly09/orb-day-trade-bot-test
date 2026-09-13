@@ -1,0 +1,58 @@
+# ORB Day Trading Bot Configuration
+# ES Futures - Opening Range Breakout Strategy
+
+strategy:
+  # Opening range window (Eastern Time)
+  orb_start: "09:30"
+  orb_end: "10:00"
+
+  # Breakout confirmation: price must close beyond range by this many ticks
+  # ES tick size = 0.25 points
+  breakout_buffer_ticks: 2  # 0.50 points beyond the range
+
+  # Only take trades if opening range is within this size (in points)
+  max_range_size: 15.0
+  min_range_size: 2.0
+
+  # Retest mode: if true, wait for price to retest the breakout level before entry
+  wait_for_retest: false
+
+risk:
+  # Stop loss placement relative to the opposite side of the opening range (in points)
+  stop_loss_buffer: 1.0
+
+  # Profit target as multiple of risk (reward:risk ratio)
+  profit_target_rr: 2.0
+
+  # Optional fixed profit target in points (overrides RR if set, 0 = disabled)
+  fixed_profit_target: 0
+
+  # Maximum loss per day in points before bot stops trading
+  max_daily_loss: 20.0
+
+  # Number of contracts to trade
+  position_size: 1
+
+  # Maximum number of trades per day
+  max_trades_per_day: 2
+
+  # Trail stop after reaching 1R profit (true/false)
+  use_trailing_stop: false
+  trailing_stop_distance: 3.0  # points behind price
+
+trading:
+  # Trading session end time (ET) - flatten all positions
+  session_end: "15:45"
+
+  # Paper trading mode (no real orders)
+  paper_trade: true
+
+  # ES contract specs
+  tick_size: 0.25
+  tick_value: 12.50  # USD per tick
+  point_value: 50.0  # USD per point (4 ticks)
+
+logging:
+  level: "INFO"
+  trade_journal: "trades.csv"
+  log_file: "orb_bot.log"

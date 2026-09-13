@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+data/
+trades.csv
+orb_bot.log
+*.egg-info/
+dist/
+build/
+.pytest_cache/
