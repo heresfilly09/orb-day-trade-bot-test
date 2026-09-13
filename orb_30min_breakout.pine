@@ -209,3 +209,12 @@ if orbJustEnded and not orbSet[1]
 // Breakout window end marker
 if etHour == breakoutEndHour and etMin == breakoutEndMinute and orbSet
     label.new(bar_index, low, "cutoff", style=label.style_label_up, color=color.new(color.gray, 50), textcolor=color.white, size=size.tiny)
+
+// ============================================================
+//  ALERTS
+// ============================================================
+alertcondition(longEntry,  "ORB Long Breakout",  "ORB LONG breakout on {{ticker}} — Close {{close}} broke above range high + buffer")
+alertcondition(shortEntry, "ORB Short Breakout", "ORB SHORT breakout on {{ticker}} — Close {{close}} broke below range low - buffer")
+alertcondition(orbJustEnded and not orbSet[1] and rangeOK, "ORB Range Set", "ORB range set on {{ticker}} — High: " + str.tostring(orbHigh) + " Low: " + str.tostring(orbLow) + " Size: " + str.tostring(rangeSize, "#.##") + " pts")
+alertcondition(orbJustEnded and not orbSet[1] and not rangeOK, "ORB Range Skipped", "ORB range SKIPPED on {{ticker}} — Size: " + str.tostring(rangeSize, "#.##") + " pts (outside filter)")
+alertcondition(atSessionEnd, "Session End", "ORB session ending on {{ticker}} — flattening all positions")
