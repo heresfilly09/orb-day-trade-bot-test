@@ -1,35 +1,70 @@
 //@version=5
 strategy("ORB 30min Breakout", overlay=true, initial_capital=10000, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.cash_per_order, commission_value=2.50)
 
-// --- Inputs ---
-orbStartHour   = input.int(9, "ORB Start Hour (ET)", minval=0, maxval=23)
-orbStartMinute = input.int(30, "ORB Start Minute", minval=0, maxval=59)
-orbEndHour     = input.int(10, "ORB End Hour (ET)", minval=0, maxval=23)
-orbEndMinute   = input.int(0, "ORB End Minute", minval=0, maxval=59)
-sessionEndHour = input.int(15, "Session End Hour (ET)", minval=0, maxval=23)
-sessionEndMin  = input.int(45, "Session End Minute", minval=0, maxval=59)
-rrRatio        = input.float(2.0, "Reward:Risk Ratio", minval=0.5, step=0.5)
-slBuffer       = input.float(0.0, "Stop Loss Buffer (pts)", minval=0, step=0.25)
-maxRangeSize   = input.float(0, "Max Range Size (0=off)", minval=0, step=1)
-maxTradesDay   = input.int(2, "Max Trades Per Day", minval=1)
+// ============================================================
+//  INPUTS
+// ============================================================
 
-// --- Time checks ---
-inORB = (hour(time, "America/New_York") == orbStartHour and minute(time, "America/New_York") >= orbStartMinute) or (hour(time, "America/New_York") > orbStartHour and hour(time, "America/New_York") < orbEndHour)
-orbJustEnded = hour(time, "America/New_York") == orbEndHour and minute(time, "America/New_York") == orbEndMinute
-afterORB = (hour(time, "America/New_York") > orbEndHour or (hour(time, "America/New_York") == orbEndHour and minute(time, "America/New_York") >= orbEndMinute)) and (hour(time, "America/New_York") < sessionEndHour or (hour(time, "America/New_York") == sessionEndHour and minute(time, "America/New_York") <= sessionEndMin))
-atSessionEnd = hour(time, "America/New_York") == sessionEndHour and minute(time, "America/New_York") == sessionEndMin
+// --- Opening Range ---
+grpORB = "Opening Range"
+orbStartHour   = input.int(9,  "ORB Start Hour (ET)",  minval=0, maxval=23, group=grpORB)
+orbStartMinute = input.int(30, "ORB Start Minute",     minval=0, maxval=59, group=grpORB)
+orbEndHour     = input.int(10, "ORB End Hour (ET)",     minval=0, maxval=23, group=grpORB)
+orbEndMinute   = input.int(0,  "ORB End Minute",        minval=0, maxval=59, group=grpORB)
+
+// --- Filters ---
+grpFilter = "Filters"
+maxRangeSize   = input.float(20, "Max Range Size pts (0=off)", minval=0, step=1, group=grpFilter)
+minRangeSize   = input.float(3,  "Min Range Size pts (0=off)", minval=0, step=0.5, group=grpFilter)
+useEMA         = input.bool(true, "EMA Trend Filter",   group=grpFilter)
+emaLen         = input.int(50,    "EMA Length",          minval=5, group=grpFilter)
+useVWAP        = input.bool(false, "VWAP Trend Filter", group=grpFilter)
+useRSIFilter   = input.bool(true,  "RSI Extreme Filter (skip overbought/oversold)", group=grpFilter)
+rsiLen         = input.int(14,     "RSI Length",         minval=2, group=grpFilter)
+rsiOB          = input.float(75,   "RSI Overbought",    minval=50, maxval=95, group=grpFilter)
+rsiOS          = input.float(25,   "RSI Oversold",       minval=5,  maxval=50, group=grpFilter)
+breakoutEndHour   = input.int(11, "Stop taking trades after hour (ET)", minval=10, maxval=15, group=grpFilter)
+breakoutEndMinute = input.int(30, "Stop taking trades after minute",    minval=0,  maxval=59, group=grpFilter)
+
+// --- Risk ---
+grpRisk = "Risk Management"
+rrRatio        = input.float(1.5, "Reward:Risk Ratio",   minval=0.5, step=0.25, group=grpRisk)
+slBuffer       = input.float(0.5, "SL Buffer beyond range (pts)", minval=0, step=0.25, group=grpRisk)
+maxTradesDay   = input.int(2,     "Max Trades Per Day",  minval=1, group=grpRisk)
+useBE          = input.bool(true, "Move SL to breakeven at 1R profit", group=grpRisk)
+
+// --- Session ---
+grpSession = "Session"
+sessionEndHour = input.int(15, "Session End Hour (ET)", minval=0, maxval=23, group=grpSession)
+sessionEndMin  = input.int(45, "Session End Minute",    minval=0, maxval=59, group=grpSession)
+
+// ============================================================
+//  TIME CHECKS (Eastern Time)
+// ============================================================
+etHour = hour(time, "America/New_York")
+etMin  = minute(time, "America/New_York")
+
+inORB = (etHour == orbStartHour and etMin >= orbStartMinute) or (etHour > orbStartHour and etHour < orbEndHour) or (etHour == orbEndHour and etMin < orbEndMinute and orbEndHour > orbStartHour)
+orbJustEnded = etHour == orbEndHour and etMin == orbEndMinute
+afterORB = (etHour > orbEndHour or (etHour == orbEndHour and etMin >= orbEndMinute)) and (etHour < sessionEndHour or (etHour == sessionEndHour and etMin <= sessionEndMin))
+atSessionEnd = etHour == sessionEndHour and etMin == sessionEndMin
 newDay = ta.change(time("D")) != 0
 
-// --- Track ORB ---
-var float orbHigh   = na
-var float orbLow    = na
-var bool  orbSet    = false
+// Breakout window: only enter trades between ORB end and the cutoff time
+inBreakoutWindow = afterORB and (etHour < breakoutEndHour or (etHour == breakoutEndHour and etMin <= breakoutEndMinute))
+
+// ============================================================
+//  OPENING RANGE TRACKING
+// ============================================================
+var float orbHigh    = na
+var float orbLow     = na
+var bool  orbSet     = false
 var int   todayTrades = 0
 
 if newDay
-    orbHigh    := na
-    orbLow     := na
-    orbSet     := false
+    orbHigh     := na
+    orbLow      := na
+    orbSet      := false
     todayTrades := 0
 
 if inORB
@@ -39,22 +74,56 @@ if inORB
 if orbJustEnded and not orbSet
     orbSet := true
 
-// --- Range filter ---
-rangeSize  = orbSet ? orbHigh - orbLow : 0
-rangeTooWide = maxRangeSize > 0 and rangeSize > maxRangeSize
+// ============================================================
+//  FILTER CALCULATIONS
+// ============================================================
+rangeSize = orbSet ? orbHigh - orbLow : 0.0
+rangeMid  = orbSet ? (orbHigh + orbLow) / 2.0 : na
 
-// --- Entry conditions ---
-canTrade   = orbSet and afterORB and not rangeTooWide and todayTrades < maxTradesDay
-longEntry  = canTrade and close > orbHigh and strategy.position_size == 0
-shortEntry = canTrade and close < orbLow  and strategy.position_size == 0
+// Range size filter
+rangeTooWide  = maxRangeSize > 0 and rangeSize > maxRangeSize
+rangeTooSmall = minRangeSize > 0 and rangeSize < minRangeSize
+rangeOK = not rangeTooWide and not rangeTooSmall
 
-// --- Calculate stops and targets ---
+// EMA trend filter
+emaValue = ta.ema(close, emaLen)
+emaBullish = not useEMA or close > emaValue
+emaBearish = not useEMA or close < emaValue
+
+// VWAP trend filter
+vwapValue = ta.vwap
+vwapBullish = not useVWAP or close > vwapValue
+vwapBearish = not useVWAP or close < vwapValue
+
+// RSI extreme filter — don't go long into overbought, don't short into oversold
+rsiValue = ta.rsi(close, rsiLen)
+rsiAllowLong  = not useRSIFilter or rsiValue < rsiOB
+rsiAllowShort = not useRSIFilter or rsiValue > rsiOS
+
+// ============================================================
+//  ENTRY CONDITIONS
+// ============================================================
+canTrade = orbSet and inBreakoutWindow and rangeOK and todayTrades < maxTradesDay and strategy.position_size == 0
+
+longEntry  = canTrade and close > orbHigh and emaBullish and vwapBullish and rsiAllowLong
+shortEntry = canTrade and close < orbLow  and emaBearish and vwapBearish and rsiAllowShort
+
+// ============================================================
+//  ENTRIES + EXITS
+// ============================================================
+var float entrySL = na
+var float entryTP = na
+var float entryPrice = na
+
 if longEntry
     sl   = orbLow - slBuffer
     risk = close - sl
     tp   = close + risk * rrRatio
     strategy.entry("Long", strategy.long)
     strategy.exit("Long Exit", "Long", stop=sl, limit=tp)
+    entrySL    := sl
+    entryTP    := tp
+    entryPrice := close
     todayTrades += 1
 
 if shortEntry
@@ -63,12 +132,48 @@ if shortEntry
     tp   = close - risk * rrRatio
     strategy.entry("Short", strategy.short)
     strategy.exit("Short Exit", "Short", stop=sl, limit=tp)
+    entrySL    := sl
+    entryTP    := tp
+    entryPrice := close
     todayTrades += 1
+
+// --- Breakeven stop: move SL to entry when price reaches 1R profit ---
+if useBE and strategy.position_size > 0
+    risk = entryPrice - entrySL
+    if high >= entryPrice + risk and entrySL < entryPrice
+        entrySL := entryPrice
+        strategy.exit("Long Exit", "Long", stop=entrySL, limit=entryTP)
+
+if useBE and strategy.position_size < 0
+    risk = entrySL - entryPrice
+    if low <= entryPrice - risk and entrySL > entryPrice
+        entrySL := entryPrice
+        strategy.exit("Short Exit", "Short", stop=entrySL, limit=entryTP)
 
 // --- Flatten at session end ---
 if atSessionEnd
     strategy.close_all("Session End")
 
-// --- Plot range ---
-plot(orbSet ? orbHigh : na, "ORB High", color=color.green, linewidth=2, style=plot.style_linebr)
-plot(orbSet ? orbLow  : na, "ORB Low",  color=color.red,   linewidth=2, style=plot.style_linebr)
+// ============================================================
+//  PLOTS
+// ============================================================
+orbHighLine = plot(orbSet ? orbHigh : na, "ORB High", color=color.green, linewidth=2, style=plot.style_linebr)
+orbLowLine  = plot(orbSet ? orbLow  : na, "ORB Low",  color=color.red,   linewidth=2, style=plot.style_linebr)
+fill(orbHighLine, orbLowLine, color=color.new(color.blue, 88))
+
+plot(orbSet and afterORB ? rangeMid : na, "Range Mid", color=color.new(color.gray, 60), linewidth=1, style=plot.style_linebr)
+plot(useEMA ? emaValue : na, "EMA", color=color.new(color.orange, 30), linewidth=1)
+
+// Range size label
+if orbJustEnded and not orbSet[1]
+    lbl = str.tostring(rangeSize, "#.##") + " pts"
+    if rangeTooWide
+        lbl += " [TOO WIDE]"
+    if rangeTooSmall
+        lbl += " [TOO SMALL]"
+    lblColor = rangeOK ? color.blue : color.gray
+    label.new(bar_index, orbHigh, lbl, style=label.style_label_down, color=lblColor, textcolor=color.white, size=size.small)
+
+// Breakout window end marker
+if etHour == breakoutEndHour and etMin == breakoutEndMinute and orbSet
+    label.new(bar_index, low, "cutoff", style=label.style_label_up, color=color.new(color.gray, 50), textcolor=color.white, size=size.tiny)
