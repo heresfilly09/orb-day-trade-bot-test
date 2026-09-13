@@ -14,24 +14,30 @@ orbEndMinute   = input.int(0,  "ORB End Minute",        minval=0, maxval=59, gro
 
 // --- Filters ---
 grpFilter = "Filters"
-maxRangeSize   = input.float(20, "Max Range Size pts (0=off)", minval=0, step=1, group=grpFilter)
-minRangeSize   = input.float(3,  "Min Range Size pts (0=off)", minval=0, step=0.5, group=grpFilter)
+maxRangeSize   = input.float(15, "Max Range Size pts (0=off)", minval=0, step=1, group=grpFilter, tooltip="Skip days where the ORB range is too wide — likely choppy/volatile")
+minRangeSize   = input.float(5,  "Min Range Size pts (0=off)", minval=0, step=0.5, group=grpFilter, tooltip="Skip days where the ORB range is too tight — weak breakouts")
+breakoutBuffer = input.float(1.0, "Breakout Buffer pts", minval=0, step=0.25, group=grpFilter, tooltip="Price must close this far beyond the range to trigger entry — reduces fakeouts")
 useEMA         = input.bool(true, "EMA Trend Filter",   group=grpFilter)
 emaLen         = input.int(50,    "EMA Length",          minval=5, group=grpFilter)
-useVWAP        = input.bool(false, "VWAP Trend Filter", group=grpFilter)
-useRSIFilter   = input.bool(true,  "RSI Extreme Filter (skip overbought/oversold)", group=grpFilter)
-rsiLen         = input.int(14,     "RSI Length",         minval=2, group=grpFilter)
-rsiOB          = input.float(75,   "RSI Overbought",    minval=50, maxval=95, group=grpFilter)
-rsiOS          = input.float(25,   "RSI Oversold",       minval=5,  maxval=50, group=grpFilter)
-breakoutEndHour   = input.int(11, "Stop taking trades after hour (ET)", minval=10, maxval=15, group=grpFilter)
-breakoutEndMinute = input.int(30, "Stop taking trades after minute",    minval=0,  maxval=59, group=grpFilter)
+useVWAP        = input.bool(true, "VWAP Trend Filter",  group=grpFilter, tooltip="Only long above VWAP, short below — confirms intraday trend")
+useRSIFilter   = input.bool(true, "RSI Extreme Filter", group=grpFilter, tooltip="Skip longs when overbought, shorts when oversold")
+rsiLen         = input.int(14,    "RSI Length",          minval=2, group=grpFilter)
+rsiOB          = input.float(70,  "RSI Overbought",     minval=50, maxval=95, group=grpFilter)
+rsiOS          = input.float(30,  "RSI Oversold",        minval=5,  maxval=50, group=grpFilter)
+useVolFilter   = input.bool(true, "Volume Confirmation", group=grpFilter, tooltip="Breakout bar volume must exceed the average — confirms conviction")
+volLen         = input.int(20,    "Volume MA Length",    minval=5, group=grpFilter)
+volMult        = input.float(1.0, "Volume Multiplier",   minval=0.5, step=0.1, group=grpFilter, tooltip="Breakout bar volume must be >= this * average volume")
+breakoutEndHour   = input.int(11, "Stop entries after hour (ET)", minval=10, maxval=15, group=grpFilter)
+breakoutEndMinute = input.int(0,  "Stop entries after minute",    minval=0,  maxval=59, group=grpFilter, tooltip="No new trades after this time — later breakouts have lower follow-through")
 
 // --- Risk ---
 grpRisk = "Risk Management"
-rrRatio        = input.float(1.5, "Reward:Risk Ratio",   minval=0.5, step=0.25, group=grpRisk)
+rrRatio        = input.float(1.0, "Reward:Risk Ratio",   minval=0.5, step=0.25, group=grpRisk, tooltip="1.0 = target equals risk. Lower = higher win%, less per win")
 slBuffer       = input.float(0.5, "SL Buffer beyond range (pts)", minval=0, step=0.25, group=grpRisk)
-maxTradesDay   = input.int(2,     "Max Trades Per Day",  minval=1, group=grpRisk)
+maxTradesDay   = input.int(1,     "Max Trades Per Day",  minval=1, group=grpRisk, tooltip="1 = only take the first breakout each day (highest quality)")
 useBE          = input.bool(true, "Move SL to breakeven at 1R profit", group=grpRisk)
+useTrail       = input.bool(false, "Trailing Stop after 1R",  group=grpRisk, tooltip="Instead of fixed TP, trail stop once in profit")
+trailDist      = input.float(3.0,  "Trailing Stop Distance (pts)", minval=0.5, step=0.5, group=grpRisk)
 
 // --- Session ---
 grpSession = "Session"
@@ -50,7 +56,6 @@ afterORB = (etHour > orbEndHour or (etHour == orbEndHour and etMin >= orbEndMinu
 atSessionEnd = etHour == sessionEndHour and etMin == sessionEndMin
 newDay = ta.change(time("D")) != 0
 
-// Breakout window: only enter trades between ORB end and the cutoff time
 inBreakoutWindow = afterORB and (etHour < breakoutEndHour or (etHour == breakoutEndHour and etMin <= breakoutEndMinute))
 
 // ============================================================
@@ -80,33 +85,32 @@ if orbJustEnded and not orbSet
 rangeSize = orbSet ? orbHigh - orbLow : 0.0
 rangeMid  = orbSet ? (orbHigh + orbLow) / 2.0 : na
 
-// Range size filter
 rangeTooWide  = maxRangeSize > 0 and rangeSize > maxRangeSize
 rangeTooSmall = minRangeSize > 0 and rangeSize < minRangeSize
 rangeOK = not rangeTooWide and not rangeTooSmall
 
-// EMA trend filter
 emaValue = ta.ema(close, emaLen)
 emaBullish = not useEMA or close > emaValue
 emaBearish = not useEMA or close < emaValue
 
-// VWAP trend filter
 vwapValue = ta.vwap
 vwapBullish = not useVWAP or close > vwapValue
 vwapBearish = not useVWAP or close < vwapValue
 
-// RSI extreme filter — don't go long into overbought, don't short into oversold
 rsiValue = ta.rsi(close, rsiLen)
 rsiAllowLong  = not useRSIFilter or rsiValue < rsiOB
 rsiAllowShort = not useRSIFilter or rsiValue > rsiOS
+
+volMA = ta.sma(volume, volLen)
+volOK = not useVolFilter or volume >= volMA * volMult
 
 // ============================================================
 //  ENTRY CONDITIONS
 // ============================================================
 canTrade = orbSet and inBreakoutWindow and rangeOK and todayTrades < maxTradesDay and strategy.position_size == 0
 
-longEntry  = canTrade and close > orbHigh and emaBullish and vwapBullish and rsiAllowLong
-shortEntry = canTrade and close < orbLow  and emaBearish and vwapBearish and rsiAllowShort
+longEntry  = canTrade and close > (orbHigh + breakoutBuffer) and emaBullish and vwapBullish and rsiAllowLong  and volOK
+shortEntry = canTrade and close < (orbLow  - breakoutBuffer) and emaBearish and vwapBearish and rsiAllowShort and volOK
 
 // ============================================================
 //  ENTRIES + EXITS
@@ -114,41 +118,65 @@ shortEntry = canTrade and close < orbLow  and emaBearish and vwapBearish and rsi
 var float entrySL = na
 var float entryTP = na
 var float entryPrice = na
+var bool  trailActive = false
 
 if longEntry
     sl   = orbLow - slBuffer
     risk = close - sl
-    tp   = close + risk * rrRatio
+    tp   = useTrail ? na : close + risk * rrRatio
     strategy.entry("Long", strategy.long)
     strategy.exit("Long Exit", "Long", stop=sl, limit=tp)
-    entrySL    := sl
-    entryTP    := tp
-    entryPrice := close
-    todayTrades += 1
+    entrySL      := sl
+    entryTP      := tp
+    entryPrice   := close
+    trailActive  := false
+    todayTrades  += 1
 
 if shortEntry
     sl   = orbHigh + slBuffer
     risk = sl - close
-    tp   = close - risk * rrRatio
+    tp   = useTrail ? na : close - risk * rrRatio
     strategy.entry("Short", strategy.short)
     strategy.exit("Short Exit", "Short", stop=sl, limit=tp)
-    entrySL    := sl
-    entryTP    := tp
-    entryPrice := close
-    todayTrades += 1
+    entrySL      := sl
+    entryTP      := tp
+    entryPrice   := close
+    trailActive  := false
+    todayTrades  += 1
 
-// --- Breakeven stop: move SL to entry when price reaches 1R profit ---
-if useBE and strategy.position_size > 0
+// --- Breakeven stop ---
+if useBE and not useTrail and strategy.position_size > 0
     risk = entryPrice - entrySL
-    if high >= entryPrice + risk and entrySL < entryPrice
+    if risk > 0 and high >= entryPrice + risk and entrySL < entryPrice
         entrySL := entryPrice
         strategy.exit("Long Exit", "Long", stop=entrySL, limit=entryTP)
 
-if useBE and strategy.position_size < 0
+if useBE and not useTrail and strategy.position_size < 0
     risk = entrySL - entryPrice
-    if low <= entryPrice - risk and entrySL > entryPrice
+    if risk > 0 and low <= entryPrice - risk and entrySL > entryPrice
         entrySL := entryPrice
         strategy.exit("Short Exit", "Short", stop=entrySL, limit=entryTP)
+
+// --- Trailing stop after 1R profit ---
+if useTrail and strategy.position_size > 0
+    risk = entryPrice - entrySL
+    if risk > 0 and high >= entryPrice + risk
+        trailActive := true
+    if trailActive
+        newSL = math.max(entrySL, high - trailDist)
+        if newSL > entrySL
+            entrySL := newSL
+        strategy.exit("Long Exit", "Long", stop=entrySL)
+
+if useTrail and strategy.position_size < 0
+    risk = entrySL - entryPrice
+    if risk > 0 and low <= entryPrice - risk
+        trailActive := true
+    if trailActive
+        newSL = math.min(entrySL, low + trailDist)
+        if newSL < entrySL
+            entrySL := newSL
+        strategy.exit("Short Exit", "Short", stop=entrySL)
 
 // --- Flatten at session end ---
 if atSessionEnd
@@ -163,6 +191,10 @@ fill(orbHighLine, orbLowLine, color=color.new(color.blue, 88))
 
 plot(orbSet and afterORB ? rangeMid : na, "Range Mid", color=color.new(color.gray, 60), linewidth=1, style=plot.style_linebr)
 plot(useEMA ? emaValue : na, "EMA", color=color.new(color.orange, 30), linewidth=1)
+
+// Breakout buffer zones
+plot(orbSet and afterORB ? orbHigh + breakoutBuffer : na, "Long Trigger", color=color.new(color.green, 70), linewidth=1, style=plot.style_linebr)
+plot(orbSet and afterORB ? orbLow  - breakoutBuffer : na, "Short Trigger", color=color.new(color.red, 70),   linewidth=1, style=plot.style_linebr)
 
 // Range size label
 if orbJustEnded and not orbSet[1]
