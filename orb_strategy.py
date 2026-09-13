@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from enum import Enum
 
+import numpy as np
 import pytz
 
 logger = logging.getLogger(__name__)
@@ -120,10 +121,22 @@ class ORBStrategy:
         self.orb_end = self._parse_time(strat["orb_end"])
         self.orb_candle_minutes = strat.get("orb_candle_minutes", 15)
         self.breakout_trigger = strat.get("breakout_trigger", "close")
-        self.breakout_buffer = strat.get("breakout_buffer_ticks", 0) * trading["tick_size"]
+        self.breakout_buffer = strat.get("breakout_buffer_pts", 0)
         self.max_range_size = strat.get("max_range_size", 0)
         self.min_range_size = strat.get("min_range_size", 0)
         self.wait_for_retest = strat.get("wait_for_retest", False)
+        self.breakout_end = self._parse_time(strat.get("breakout_end", "11:00"))
+
+        self.use_ema = strat.get("use_ema_filter", True)
+        self.ema_length = strat.get("ema_length", 50)
+        self.use_vwap = strat.get("use_vwap_filter", True)
+        self.use_rsi = strat.get("use_rsi_filter", True)
+        self.rsi_length = strat.get("rsi_length", 14)
+        self.rsi_overbought = strat.get("rsi_overbought", 70)
+        self.rsi_oversold = strat.get("rsi_oversold", 30)
+        self.use_volume = strat.get("use_volume_filter", True)
+        self.volume_ma_length = strat.get("volume_ma_length", 20)
+        self.volume_multiplier = strat.get("volume_multiplier", 1.0)
 
         self.stop_loss_buffer = risk["stop_loss_buffer"]
         self.profit_target_rr = risk["profit_target_rr"]
@@ -133,6 +146,7 @@ class ORBStrategy:
         self.max_trades_per_day = risk["max_trades_per_day"]
         self.use_trailing_stop = risk["use_trailing_stop"]
         self.trailing_stop_distance = risk["trailing_stop_distance"]
+        self.use_breakeven = risk.get("use_breakeven", True)
 
         self.session_end = self._parse_time(trading["session_end"])
         self.point_value = trading["point_value"]
@@ -149,6 +163,13 @@ class ORBStrategy:
         self._current_candle: PriceBar | None = None
         self._candle_end: datetime | None = None
 
+        self._close_history: list[float] = []
+        self._volume_history: list[int] = []
+        self._vwap_cum_vol: float = 0.0
+        self._vwap_cum_pv: float = 0.0
+        self._vwap: float = 0.0
+        self._be_applied: bool = False
+
     @staticmethod
     def _parse_time(t: str) -> time:
         parts = t.split(":")
@@ -162,6 +183,41 @@ class ORBStrategy:
     def _get_et_time(self, dt: datetime) -> time:
         return self._to_et(dt).time()
 
+    def _compute_ema(self) -> float | None:
+        if len(self._close_history) < self.ema_length:
+            return None
+        closes = np.array(self._close_history[-self.ema_length * 3:])
+        multiplier = 2.0 / (self.ema_length + 1)
+        ema = closes[0]
+        for c in closes[1:]:
+            ema = (c - ema) * multiplier + ema
+        return ema
+
+    def _compute_rsi(self) -> float | None:
+        length = self.rsi_length
+        if len(self._close_history) < length + 1:
+            return None
+        closes = self._close_history[-(length + 1):]
+        gains = []
+        losses = []
+        for i in range(1, len(closes)):
+            delta = closes[i] - closes[i - 1]
+            gains.append(max(delta, 0))
+            losses.append(max(-delta, 0))
+        avg_gain = sum(gains) / length
+        avg_loss = sum(losses) / length
+        if avg_loss == 0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return 100.0 - (100.0 / (1.0 + rs))
+
+    def _volume_above_average(self, current_volume: int) -> bool:
+        if len(self._volume_history) < self.volume_ma_length:
+            return True
+        recent = self._volume_history[-self.volume_ma_length:]
+        avg = sum(recent) / len(recent)
+        return current_volume >= avg * self.volume_multiplier
+
     def reset_day(self, date_str: str = "") -> None:
         self.state = ORBState.WAITING_FOR_OPEN
         self.opening_range.reset()
@@ -172,10 +228,23 @@ class ORBStrategy:
         self._orb_candles = []
         self._current_candle = None
         self._candle_end = None
+        self._vwap_cum_vol = 0.0
+        self._vwap_cum_pv = 0.0
+        self._vwap = 0.0
+        self._be_applied = False
         logger.info("Day reset: %s", date_str)
 
     def on_bar(self, bar: PriceBar) -> Trade | None:
         et_time = self._get_et_time(bar.timestamp)
+
+        self._close_history.append(bar.close)
+        self._volume_history.append(bar.volume)
+
+        typical = (bar.high + bar.low + bar.close) / 3.0
+        self._vwap_cum_pv += typical * bar.volume
+        self._vwap_cum_vol += bar.volume
+        if self._vwap_cum_vol > 0:
+            self._vwap = self._vwap_cum_pv / self._vwap_cum_vol
 
         if self.state == ORBState.DONE_FOR_DAY:
             return None
@@ -282,6 +351,13 @@ class ORBStrategy:
         return None
 
     def _check_breakout(self, bar: PriceBar) -> Trade | None:
+        et_time = self._get_et_time(bar.timestamp)
+
+        if et_time >= self.breakout_end:
+            logger.info("Past breakout cutoff (%s) — no more entries today", self.breakout_end)
+            self.state = ORBState.DONE_FOR_DAY
+            return None
+
         if self._is_daily_limit_hit():
             self.state = ORBState.DONE_FOR_DAY
             return None
@@ -302,14 +378,14 @@ class ORBStrategy:
             else bar.low < breakout_low
         )
 
-        if is_break_above:
+        if is_break_above and self._filters_pass(bar, Direction.LONG):
             if self.wait_for_retest:
                 self._retest_pending = Direction.LONG
                 logger.info("Breakout above %.2f — waiting for retest", breakout_high)
                 return None
             return self._enter_trade(bar, Direction.LONG)
 
-        if is_break_below:
+        if is_break_below and self._filters_pass(bar, Direction.SHORT):
             if self.wait_for_retest:
                 self._retest_pending = Direction.SHORT
                 logger.info("Breakout below %.2f — waiting for retest", breakout_low)
@@ -317,6 +393,41 @@ class ORBStrategy:
             return self._enter_trade(bar, Direction.SHORT)
 
         return None
+
+    def _filters_pass(self, bar: PriceBar, direction: Direction) -> bool:
+        if self.use_ema:
+            ema = self._compute_ema()
+            if ema is not None:
+                if direction == Direction.LONG and bar.close <= ema:
+                    logger.debug("EMA filter blocked LONG: close %.2f <= EMA %.2f", bar.close, ema)
+                    return False
+                if direction == Direction.SHORT and bar.close >= ema:
+                    logger.debug("EMA filter blocked SHORT: close %.2f >= EMA %.2f", bar.close, ema)
+                    return False
+
+        if self.use_vwap and self._vwap > 0:
+            if direction == Direction.LONG and bar.close <= self._vwap:
+                logger.debug("VWAP filter blocked LONG: close %.2f <= VWAP %.2f", bar.close, self._vwap)
+                return False
+            if direction == Direction.SHORT and bar.close >= self._vwap:
+                logger.debug("VWAP filter blocked SHORT: close %.2f >= VWAP %.2f", bar.close, self._vwap)
+                return False
+
+        if self.use_rsi:
+            rsi = self._compute_rsi()
+            if rsi is not None:
+                if direction == Direction.LONG and rsi >= self.rsi_overbought:
+                    logger.debug("RSI filter blocked LONG: RSI %.1f >= %.1f", rsi, self.rsi_overbought)
+                    return False
+                if direction == Direction.SHORT and rsi <= self.rsi_oversold:
+                    logger.debug("RSI filter blocked SHORT: RSI %.1f <= %.1f", rsi, self.rsi_oversold)
+                    return False
+
+        if self.use_volume and not self._volume_above_average(bar.volume):
+            logger.debug("Volume filter blocked: vol %d below average", bar.volume)
+            return False
+
+        return True
 
     def _check_retest(self, bar: PriceBar) -> Trade | None:
         orb = self.opening_range
@@ -357,7 +468,7 @@ class ORBStrategy:
             direction=direction,
             entry_price=entry_price,
             stop_loss=stop_loss,
-            profit_target=profit_target,
+            profit_target=profit_target if not self.use_trailing_stop else 0.0,
             size=self.position_size,
             status=TradeStatus.OPEN,
         )
@@ -365,10 +476,12 @@ class ORBStrategy:
         self.current_trade = trade
         self.state = ORBState.IN_TRADE
         self._trailing_stop = None
+        self._be_applied = False
 
         logger.info(
             "ENTRY %s @ %.2f | SL: %.2f | TP: %.2f | Risk: %.2f pts",
-            direction.value, entry_price, stop_loss, profit_target, risk,
+            direction.value, entry_price, stop_loss,
+            profit_target if not self.use_trailing_stop else 0.0, risk,
         )
         return trade
 
@@ -383,6 +496,14 @@ class ORBStrategy:
             return self._manage_short(bar, trade)
 
     def _manage_long(self, bar: PriceBar, trade: Trade) -> Trade | None:
+        risk = trade.entry_price - trade.stop_loss
+
+        if self.use_breakeven and not self._be_applied and not self.use_trailing_stop:
+            if risk > 0 and bar.high >= trade.entry_price + risk:
+                trade.stop_loss = trade.entry_price
+                self._be_applied = True
+                logger.info("Breakeven stop applied for LONG at %.2f", trade.entry_price)
+
         if self.use_trailing_stop:
             self._update_trailing_stop_long(bar, trade)
 
@@ -392,14 +513,24 @@ class ORBStrategy:
 
         if bar.low <= effective_stop:
             reason = "trailing stop" if self._trailing_stop and effective_stop == self._trailing_stop else "stop loss"
+            if self._be_applied and reason == "stop loss":
+                reason = "breakeven stop"
             return self._exit_trade(bar, effective_stop, reason)
 
-        if bar.high >= trade.profit_target:
+        if not self.use_trailing_stop and trade.profit_target > 0 and bar.high >= trade.profit_target:
             return self._exit_trade(bar, trade.profit_target, "profit target")
 
         return None
 
     def _manage_short(self, bar: PriceBar, trade: Trade) -> Trade | None:
+        risk = trade.stop_loss - trade.entry_price
+
+        if self.use_breakeven and not self._be_applied and not self.use_trailing_stop:
+            if risk > 0 and bar.low <= trade.entry_price - risk:
+                trade.stop_loss = trade.entry_price
+                self._be_applied = True
+                logger.info("Breakeven stop applied for SHORT at %.2f", trade.entry_price)
+
         if self.use_trailing_stop:
             self._update_trailing_stop_short(bar, trade)
 
@@ -409,23 +540,25 @@ class ORBStrategy:
 
         if bar.high >= effective_stop:
             reason = "trailing stop" if self._trailing_stop and effective_stop == self._trailing_stop else "stop loss"
+            if self._be_applied and reason == "stop loss":
+                reason = "breakeven stop"
             return self._exit_trade(bar, effective_stop, reason)
 
-        if bar.low <= trade.profit_target:
+        if not self.use_trailing_stop and trade.profit_target > 0 and bar.low <= trade.profit_target:
             return self._exit_trade(bar, trade.profit_target, "profit target")
 
         return None
 
     def _update_trailing_stop_long(self, bar: PriceBar, trade: Trade) -> None:
         risk = trade.entry_price - trade.stop_loss
-        if bar.high >= trade.entry_price + risk:
+        if risk > 0 and bar.high >= trade.entry_price + risk:
             new_trail = bar.high - self.trailing_stop_distance
             if self._trailing_stop is None or new_trail > self._trailing_stop:
                 self._trailing_stop = new_trail
 
     def _update_trailing_stop_short(self, bar: PriceBar, trade: Trade) -> None:
         risk = trade.stop_loss - trade.entry_price
-        if bar.low <= trade.entry_price - risk:
+        if risk > 0 and bar.low <= trade.entry_price - risk:
             new_trail = bar.low + self.trailing_stop_distance
             if self._trailing_stop is None or new_trail < self._trailing_stop:
                 self._trailing_stop = new_trail
@@ -447,6 +580,7 @@ class ORBStrategy:
 
         self.current_trade = None
         self._trailing_stop = None
+        self._be_applied = False
         self.state = ORBState.RANGE_SET
         return trade
 
