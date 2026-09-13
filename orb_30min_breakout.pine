@@ -1,4 +1,4 @@
-//@version=6
+//@version=5
 strategy("ORB 30min Breakout", overlay=true, initial_capital=10000, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.cash_per_order, commission_value=2.50)
 
 // ============================================================
