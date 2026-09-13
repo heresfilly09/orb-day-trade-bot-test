@@ -1,0 +1,58 @@
+//@version=5
+indicator("ORB 30min Range", overlay=true, max_bars_back=500)
+
+// --- Inputs ---
+orbStartHour   = input.int(9, "ORB Start Hour (ET)", minval=0, maxval=23)
+orbStartMinute = input.int(30, "ORB Start Minute", minval=0, maxval=59)
+orbEndHour     = input.int(10, "ORB End Hour (ET)", minval=0, maxval=23)
+orbEndMinute   = input.int(0, "ORB End Minute", minval=0, maxval=59)
+sessionEndHour = input.int(15, "Session End Hour (ET)", minval=0, maxval=23)
+sessionEndMin  = input.int(45, "Session End Minute", minval=0, maxval=59)
+showLabels     = input.bool(true, "Show Range Labels")
+rangeColor     = input.color(color.new(color.blue, 85), "Range Fill Color")
+highColor      = input.color(color.green, "Range High Color")
+lowColor       = input.color(color.red, "Range Low Color")
+
+// --- Time checks (Eastern Time) ---
+inORB = (hour(time, "America/New_York") == orbStartHour and minute(time, "America/New_York") >= orbStartMinute) or (hour(time, "America/New_York") == orbStartHour + 1 and minute(time, "America/New_York") < orbEndMinute and orbEndHour == orbStartHour + 1) or (hour(time, "America/New_York") > orbStartHour and hour(time, "America/New_York") < orbEndHour)
+orbJustEnded = hour(time, "America/New_York") == orbEndHour and minute(time, "America/New_York") == orbEndMinute
+afterORB = (hour(time, "America/New_York") > orbEndHour or (hour(time, "America/New_York") == orbEndHour and minute(time, "America/New_York") >= orbEndMinute)) and (hour(time, "America/New_York") < sessionEndHour or (hour(time, "America/New_York") == sessionEndHour and minute(time, "America/New_York") <= sessionEndMin))
+newDay = ta.change(time("D")) != 0
+
+// --- Track the opening range ---
+var float orbHigh = na
+var float orbLow  = na
+var bool  orbSet  = false
+
+if newDay
+    orbHigh := na
+    orbLow  := na
+    orbSet  := false
+
+if inORB
+    orbHigh := na(orbHigh) ? high : math.max(orbHigh, high)
+    orbLow  := na(orbLow)  ? low  : math.min(orbLow, low)
+
+if orbJustEnded and not orbSet
+    orbSet := true
+
+// --- Plot range lines (extend through the session) ---
+orbHighLine = plot(orbSet and afterORB ? orbHigh : na, "ORB High", color=highColor, linewidth=2, style=plot.style_linebr)
+orbLowLine  = plot(orbSet and afterORB ? orbLow  : na, "ORB Low",  color=lowColor,  linewidth=2, style=plot.style_linebr)
+fill(orbHighLine, orbLowLine, color=rangeColor)
+
+// --- Range size label ---
+if showLabels and orbJustEnded and not orbSet[1]
+    rangeSize = orbHigh - orbLow
+    label.new(bar_index, orbHigh, str.tostring(rangeSize, "#.##") + " pts", style=label.style_label_down, color=color.blue, textcolor=color.white, size=size.small)
+
+// --- Breakout markers ---
+longBreak  = orbSet and afterORB and close > orbHigh and close[1] <= orbHigh
+shortBreak = orbSet and afterORB and close < orbLow  and close[1] >= orbLow
+
+plotshape(longBreak,  "Long Breakout",  shape.triangleup,   location.belowbar, color.green, size=size.small)
+plotshape(shortBreak, "Short Breakout", shape.triangledown, location.abovebar, color.red,   size=size.small)
+
+// --- Alerts ---
+alertcondition(longBreak,  "ORB Long Breakout",  "ES broke above the opening range high")
+alertcondition(shortBreak, "ORB Short Breakout", "ES broke below the opening range low")

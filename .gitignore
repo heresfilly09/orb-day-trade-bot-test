@@ -3,10 +3,14 @@ __pycache__/
 *.pyo
 .venv/
 venv/
-data/
-trades.csv
+.env
+orb_trades.csv
+orb_summary.csv
 orb_bot.log
+es_sample_data.csv
 *.egg-info/
 dist/
 build/
 .pytest_cache/
+data/
+trades.csv

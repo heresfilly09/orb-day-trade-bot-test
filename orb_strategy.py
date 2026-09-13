@@ -1,21 +1,106 @@
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
+from enum import Enum
 
 import pytz
-
-from .models import (
-    DailyStats,
-    Direction,
-    ORBState,
-    OpeningRange,
-    PriceBar,
-    Trade,
-    TradeStatus,
-)
 
 logger = logging.getLogger(__name__)
 
 ET = pytz.timezone("US/Eastern")
+
+
+class Direction(Enum):
+    LONG = "LONG"
+    SHORT = "SHORT"
+
+
+class TradeStatus(Enum):
+    PENDING = "PENDING"
+    OPEN = "OPEN"
+    CLOSED = "CLOSED"
+
+
+class ORBState(Enum):
+    WAITING_FOR_OPEN = "WAITING_FOR_OPEN"
+    BUILDING_RANGE = "BUILDING_RANGE"
+    RANGE_SET = "RANGE_SET"
+    IN_TRADE = "IN_TRADE"
+    DONE_FOR_DAY = "DONE_FOR_DAY"
+
+
+@dataclass
+class PriceBar:
+    timestamp: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: int = 0
+
+
+@dataclass
+class OpeningRange:
+    high: float = 0.0
+    low: float = float("inf")
+    established: bool = False
+
+    @property
+    def size(self) -> float:
+        if not self.established:
+            return 0.0
+        return self.high - self.low
+
+    @property
+    def midpoint(self) -> float:
+        return (self.high + self.low) / 2.0
+
+    def reset(self) -> None:
+        self.high = 0.0
+        self.low = float("inf")
+        self.established = False
+
+
+@dataclass
+class Trade:
+    entry_time: datetime | None = None
+    exit_time: datetime | None = None
+    direction: Direction | None = None
+    entry_price: float = 0.0
+    exit_price: float = 0.0
+    stop_loss: float = 0.0
+    profit_target: float = 0.0
+    size: int = 1
+    status: TradeStatus = TradeStatus.PENDING
+    pnl_points: float = 0.0
+    pnl_dollars: float = 0.0
+    exit_reason: str = ""
+
+    def calculate_pnl(self, point_value: float) -> None:
+        if self.direction == Direction.LONG:
+            self.pnl_points = self.exit_price - self.entry_price
+        else:
+            self.pnl_points = self.entry_price - self.exit_price
+        self.pnl_dollars = self.pnl_points * point_value * self.size
+
+
+@dataclass
+class DailyStats:
+    date: str = ""
+    trades: list[Trade] = field(default_factory=list)
+    total_pnl_points: float = 0.0
+    total_pnl_dollars: float = 0.0
+    winners: int = 0
+    losers: int = 0
+
+    def update(self, trade: Trade) -> None:
+        self.trades.append(trade)
+        self.total_pnl_points += trade.pnl_points
+        self.total_pnl_dollars += trade.pnl_dollars
+        if trade.pnl_points > 0:
+            self.winners += 1
+        elif trade.pnl_points < 0:
+            self.losers += 1
 
 
 class ORBStrategy:
@@ -60,7 +145,6 @@ class ORBStrategy:
         self._trailing_stop: float | None = None
         self._retest_pending: Direction | None = None
 
-        # Track the two 15-min candles that form the opening range
         self._orb_candles: list[PriceBar] = []
         self._current_candle: PriceBar | None = None
         self._candle_end: datetime | None = None
@@ -91,7 +175,6 @@ class ORBStrategy:
         logger.info("Day reset: %s", date_str)
 
     def on_bar(self, bar: PriceBar) -> Trade | None:
-        """Process a new price bar. Returns a Trade if one was opened or closed."""
         et_time = self._get_et_time(bar.timestamp)
 
         if self.state == ORBState.DONE_FOR_DAY:
@@ -147,7 +230,6 @@ class ORBStrategy:
             return None
 
         if et_dt >= self._candle_end:
-            # Current candle is complete — save it
             self._orb_candles.append(self._current_candle)
             logger.info(
                 "ORB candle %d complete — O: %.2f H: %.2f L: %.2f C: %.2f",
@@ -340,7 +422,6 @@ class ORBStrategy:
             new_trail = bar.high - self.trailing_stop_distance
             if self._trailing_stop is None or new_trail > self._trailing_stop:
                 self._trailing_stop = new_trail
-                logger.debug("Trailing stop updated to %.2f", new_trail)
 
     def _update_trailing_stop_short(self, bar: PriceBar, trade: Trade) -> None:
         risk = trade.stop_loss - trade.entry_price
@@ -348,7 +429,6 @@ class ORBStrategy:
             new_trail = bar.low + self.trailing_stop_distance
             if self._trailing_stop is None or new_trail < self._trailing_stop:
                 self._trailing_stop = new_trail
-                logger.debug("Trailing stop updated to %.2f", new_trail)
 
     def _exit_trade(self, bar: PriceBar, exit_price: float, reason: str) -> Trade:
         trade = self.current_trade

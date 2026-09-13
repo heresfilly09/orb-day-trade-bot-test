@@ -1,62 +1,37 @@
 # ORB Day Trading Bot Configuration
-# ES Futures - Opening Range Breakout Strategy
+# ES Futures — Opening Range Breakout (first two 15-min candles)
 
 strategy:
-  # Opening range: first two 15-min candles at NYSE open (Eastern Time)
   orb_start: "09:30"
   orb_end: "10:00"
-  orb_candle_minutes: 15  # Two 15-min candles define the range
-
-  # Breakout trigger: "close" = candle closes beyond range, "wick" = any price beyond range
-  breakout_trigger: "close"
-
-  # Optional buffer in ticks beyond the range to confirm breakout (0 = none)
-  breakout_buffer_ticks: 0
-
-  # Only take trades if opening range is within this size (in points, 0 = no filter)
-  max_range_size: 0
-  min_range_size: 0
-
-  # Retest mode: if true, wait for price to retest the breakout level before entry
+  orb_candle_minutes: 15
+  breakout_trigger: "close"       # "close" or "wick"
+  breakout_buffer_ticks: 0        # extra ticks beyond range to confirm (0 = none)
+  max_range_size: 0               # skip day if range > this (0 = off)
+  min_range_size: 0               # skip day if range < this (0 = off)
   wait_for_retest: false
 
 risk:
-  # Stop loss at opposite end of the opening range
-  # Buffer adds extra room beyond the opposite end (0 = exact opposite end)
-  stop_loss_buffer: 0.0
-
-  # Profit target as multiple of risk (reward:risk ratio)
-  profit_target_rr: 2.0
-
-  # Optional fixed profit target in points (overrides RR if set, 0 = disabled)
-  fixed_profit_target: 0
-
-  # Maximum loss per day in points before bot stops trading
+  stop_loss_buffer: 0.0           # extra pts beyond opposite end (0 = exact)
+  profit_target_rr: 2.0           # reward:risk ratio
+  fixed_profit_target: 0          # fixed pts target (overrides RR, 0 = off)
   max_daily_loss: 20.0
-
-  # Number of contracts to trade
   position_size: 1
-
-  # Maximum number of trades per day
   max_trades_per_day: 2
-
-  # Trail stop after reaching 1R profit (true/false)
   use_trailing_stop: false
-  trailing_stop_distance: 3.0  # points behind price
+  trailing_stop_distance: 3.0
 
 trading:
-  # Trading session end time (ET) - flatten all positions
   session_end: "15:45"
-
-  # Paper trading mode (no real orders)
   paper_trade: true
-
-  # ES contract specs
   tick_size: 0.25
-  tick_value: 12.50  # USD per tick
-  point_value: 50.0  # USD per point (4 ticks)
+  tick_value: 12.50
+  point_value: 50.0
+
+tradovate:
+  demo: true
 
 logging:
   level: "INFO"
-  trade_journal: "trades.csv"
+  trade_journal: "orb_trades.csv"
   log_file: "orb_bot.log"

@@ -1,0 +1,74 @@
+//@version=5
+strategy("ORB 30min Breakout", overlay=true, initial_capital=10000, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.cash_per_order, commission_value=2.50)
+
+// --- Inputs ---
+orbStartHour   = input.int(9, "ORB Start Hour (ET)", minval=0, maxval=23)
+orbStartMinute = input.int(30, "ORB Start Minute", minval=0, maxval=59)
+orbEndHour     = input.int(10, "ORB End Hour (ET)", minval=0, maxval=23)
+orbEndMinute   = input.int(0, "ORB End Minute", minval=0, maxval=59)
+sessionEndHour = input.int(15, "Session End Hour (ET)", minval=0, maxval=23)
+sessionEndMin  = input.int(45, "Session End Minute", minval=0, maxval=59)
+rrRatio        = input.float(2.0, "Reward:Risk Ratio", minval=0.5, step=0.5)
+slBuffer       = input.float(0.0, "Stop Loss Buffer (pts)", minval=0, step=0.25)
+maxRangeSize   = input.float(0, "Max Range Size (0=off)", minval=0, step=1)
+maxTradesDay   = input.int(2, "Max Trades Per Day", minval=1)
+
+// --- Time checks ---
+inORB = (hour(time, "America/New_York") == orbStartHour and minute(time, "America/New_York") >= orbStartMinute) or (hour(time, "America/New_York") > orbStartHour and hour(time, "America/New_York") < orbEndHour)
+orbJustEnded = hour(time, "America/New_York") == orbEndHour and minute(time, "America/New_York") == orbEndMinute
+afterORB = (hour(time, "America/New_York") > orbEndHour or (hour(time, "America/New_York") == orbEndHour and minute(time, "America/New_York") >= orbEndMinute)) and (hour(time, "America/New_York") < sessionEndHour or (hour(time, "America/New_York") == sessionEndHour and minute(time, "America/New_York") <= sessionEndMin))
+atSessionEnd = hour(time, "America/New_York") == sessionEndHour and minute(time, "America/New_York") == sessionEndMin
+newDay = ta.change(time("D")) != 0
+
+// --- Track ORB ---
+var float orbHigh   = na
+var float orbLow    = na
+var bool  orbSet    = false
+var int   todayTrades = 0
+
+if newDay
+    orbHigh    := na
+    orbLow     := na
+    orbSet     := false
+    todayTrades := 0
+
+if inORB
+    orbHigh := na(orbHigh) ? high : math.max(orbHigh, high)
+    orbLow  := na(orbLow)  ? low  : math.min(orbLow, low)
+
+if orbJustEnded and not orbSet
+    orbSet := true
+
+// --- Range filter ---
+rangeSize  = orbSet ? orbHigh - orbLow : 0
+rangeTooWide = maxRangeSize > 0 and rangeSize > maxRangeSize
+
+// --- Entry conditions ---
+canTrade   = orbSet and afterORB and not rangeTooWide and todayTrades < maxTradesDay
+longEntry  = canTrade and close > orbHigh and strategy.position_size == 0
+shortEntry = canTrade and close < orbLow  and strategy.position_size == 0
+
+// --- Calculate stops and targets ---
+if longEntry
+    sl   = orbLow - slBuffer
+    risk = close - sl
+    tp   = close + risk * rrRatio
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=sl, limit=tp)
+    todayTrades += 1
+
+if shortEntry
+    sl   = orbHigh + slBuffer
+    risk = sl - close
+    tp   = close - risk * rrRatio
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=sl, limit=tp)
+    todayTrades += 1
+
+// --- Flatten at session end ---
+if atSessionEnd
+    strategy.close_all("Session End")
+
+// --- Plot range ---
+plot(orbSet ? orbHigh : na, "ORB High", color=color.green, linewidth=2, style=plot.style_linebr)
+plot(orbSet ? orbLow  : na, "ORB Low",  color=color.red,   linewidth=2, style=plot.style_linebr)
