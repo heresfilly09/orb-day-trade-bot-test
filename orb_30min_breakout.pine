@@ -1,4 +1,4 @@
-//@version=5
+//@version=6
 strategy("ORB 30min Breakout", overlay=true, initial_capital=10000, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.cash_per_order, commission_value=2.50)
 
 // ============================================================
@@ -213,8 +213,8 @@ if etHour == breakoutEndHour and etMin == breakoutEndMinute and orbSet
 // ============================================================
 //  ALERTS
 // ============================================================
-alertcondition(longEntry,  "ORB Long Breakout",  "ORB LONG breakout on {{ticker}} — Close {{close}} broke above range high + buffer")
-alertcondition(shortEntry, "ORB Short Breakout", "ORB SHORT breakout on {{ticker}} — Close {{close}} broke below range low - buffer")
-alertcondition(orbJustEnded and not orbSet[1] and rangeOK, "ORB Range Set", "ORB range set on {{ticker}} — High: " + str.tostring(orbHigh) + " Low: " + str.tostring(orbLow) + " Size: " + str.tostring(rangeSize, "#.##") + " pts")
-alertcondition(orbJustEnded and not orbSet[1] and not rangeOK, "ORB Range Skipped", "ORB range SKIPPED on {{ticker}} — Size: " + str.tostring(rangeSize, "#.##") + " pts (outside filter)")
+alertcondition(longEntry,  "ORB Long Breakout",  "ORB LONG breakout on {{ticker}} at {{close}}")
+alertcondition(shortEntry, "ORB Short Breakout", "ORB SHORT breakout on {{ticker}} at {{close}}")
+alertcondition(orbJustEnded and not orbSet[1] and rangeOK, "ORB Range Set", "ORB range set on {{ticker}} — check chart for levels")
+alertcondition(orbJustEnded and not orbSet[1] and not rangeOK, "ORB Range Skipped", "ORB range skipped on {{ticker}} — outside size filter")
 alertcondition(atSessionEnd, "Session End", "ORB session ending on {{ticker}} — flattening all positions")
