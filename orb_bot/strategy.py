@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 
 import pytz
 
@@ -21,8 +21,9 @@ ET = pytz.timezone("US/Eastern")
 class ORBStrategy:
     """Opening Range Breakout strategy for ES futures.
 
-    Tracks the first 30 minutes of the NYSE open (9:30-10:00 ET),
-    then trades breakouts above the high or below the low of that range.
+    Builds the opening range from the first two 15-minute candles at NYSE open
+    (9:30-10:00 ET), then trades breakouts above the high or below the low.
+    Stop loss is placed at the opposite end of the range.
     """
 
     def __init__(self, config: dict):
@@ -32,10 +33,12 @@ class ORBStrategy:
 
         self.orb_start = self._parse_time(strat["orb_start"])
         self.orb_end = self._parse_time(strat["orb_end"])
-        self.breakout_buffer = strat["breakout_buffer_ticks"] * trading["tick_size"]
-        self.max_range_size = strat["max_range_size"]
-        self.min_range_size = strat["min_range_size"]
-        self.wait_for_retest = strat["wait_for_retest"]
+        self.orb_candle_minutes = strat.get("orb_candle_minutes", 15)
+        self.breakout_trigger = strat.get("breakout_trigger", "close")
+        self.breakout_buffer = strat.get("breakout_buffer_ticks", 0) * trading["tick_size"]
+        self.max_range_size = strat.get("max_range_size", 0)
+        self.min_range_size = strat.get("min_range_size", 0)
+        self.wait_for_retest = strat.get("wait_for_retest", False)
 
         self.stop_loss_buffer = risk["stop_loss_buffer"]
         self.profit_target_rr = risk["profit_target_rr"]
@@ -57,17 +60,23 @@ class ORBStrategy:
         self._trailing_stop: float | None = None
         self._retest_pending: Direction | None = None
 
+        # Track the two 15-min candles that form the opening range
+        self._orb_candles: list[PriceBar] = []
+        self._current_candle: PriceBar | None = None
+        self._candle_end: datetime | None = None
+
     @staticmethod
     def _parse_time(t: str) -> time:
         parts = t.split(":")
         return time(int(parts[0]), int(parts[1]))
 
-    def _get_et_time(self, dt: datetime) -> time:
+    def _to_et(self, dt: datetime) -> datetime:
         if dt.tzinfo is None:
-            dt = ET.localize(dt)
-        else:
-            dt = dt.astimezone(ET)
-        return dt.time()
+            return ET.localize(dt)
+        return dt.astimezone(ET)
+
+    def _get_et_time(self, dt: datetime) -> time:
+        return self._to_et(dt).time()
 
     def reset_day(self, date_str: str = "") -> None:
         self.state = ORBState.WAITING_FOR_OPEN
@@ -76,6 +85,9 @@ class ORBStrategy:
         self.daily_stats = DailyStats(date=date_str)
         self._trailing_stop = None
         self._retest_pending = None
+        self._orb_candles = []
+        self._current_candle = None
+        self._candle_end = None
         logger.info("Day reset: %s", date_str)
 
     def on_bar(self, bar: PriceBar) -> Trade | None:
@@ -91,15 +103,12 @@ class ORBStrategy:
         if self.state == ORBState.WAITING_FOR_OPEN:
             if et_time >= self.orb_start:
                 self.state = ORBState.BUILDING_RANGE
-                logger.info("Market open - building opening range")
-                self.opening_range.update(bar)
+                logger.info("Market open — building range from two %d-min candles", self.orb_candle_minutes)
+                self._start_new_candle(bar)
             return None
 
         if self.state == ORBState.BUILDING_RANGE:
-            self.opening_range.update(bar)
-            if et_time >= self.orb_end:
-                return self._finalize_range()
-            return None
+            return self._build_range(bar)
 
         if self.state == ORBState.RANGE_SET:
             return self._check_breakout(bar)
@@ -109,34 +118,84 @@ class ORBStrategy:
 
         return None
 
+    def _start_new_candle(self, bar: PriceBar) -> None:
+        self._current_candle = PriceBar(
+            timestamp=bar.timestamp,
+            open=bar.open,
+            high=bar.high,
+            low=bar.low,
+            close=bar.close,
+            volume=bar.volume,
+        )
+        et_dt = self._to_et(bar.timestamp)
+        self._candle_end = et_dt + timedelta(minutes=self.orb_candle_minutes)
+
+    def _update_current_candle(self, bar: PriceBar) -> None:
+        candle = self._current_candle
+        if bar.high > candle.high:
+            candle.high = bar.high
+        if bar.low < candle.low:
+            candle.low = bar.low
+        candle.close = bar.close
+        candle.volume += bar.volume
+
+    def _build_range(self, bar: PriceBar) -> None:
+        et_dt = self._to_et(bar.timestamp)
+
+        if self._current_candle is None:
+            self._start_new_candle(bar)
+            return None
+
+        if et_dt >= self._candle_end:
+            # Current candle is complete — save it
+            self._orb_candles.append(self._current_candle)
+            logger.info(
+                "ORB candle %d complete — O: %.2f H: %.2f L: %.2f C: %.2f",
+                len(self._orb_candles),
+                self._current_candle.open,
+                self._current_candle.high,
+                self._current_candle.low,
+                self._current_candle.close,
+            )
+
+            if len(self._orb_candles) >= 2:
+                return self._finalize_range()
+
+            self._start_new_candle(bar)
+        else:
+            self._update_current_candle(bar)
+
+        return None
+
     def _finalize_range(self) -> None:
+        orb_high = max(c.high for c in self._orb_candles)
+        orb_low = min(c.low for c in self._orb_candles)
+
+        self.opening_range.high = orb_high
+        self.opening_range.low = orb_low
         self.opening_range.established = True
         size = self.opening_range.size
 
-        if size > self.max_range_size:
+        if self.max_range_size > 0 and size > self.max_range_size:
             logger.warning(
                 "Opening range too wide: %.2f pts (max %.2f). No trades today.",
-                size,
-                self.max_range_size,
+                size, self.max_range_size,
             )
             self.state = ORBState.DONE_FOR_DAY
             return None
 
-        if size < self.min_range_size:
+        if self.min_range_size > 0 and size < self.min_range_size:
             logger.warning(
                 "Opening range too narrow: %.2f pts (min %.2f). No trades today.",
-                size,
-                self.min_range_size,
+                size, self.min_range_size,
             )
             self.state = ORBState.DONE_FOR_DAY
             return None
 
         self.state = ORBState.RANGE_SET
         logger.info(
-            "Opening range established — High: %.2f  Low: %.2f  Size: %.2f pts",
-            self.opening_range.high,
-            self.opening_range.low,
-            size,
+            "Opening range set — High: %.2f  Low: %.2f  Size: %.2f pts",
+            orb_high, orb_low, size,
         )
         return None
 
@@ -152,14 +211,23 @@ class ORBStrategy:
         if self.wait_for_retest and self._retest_pending:
             return self._check_retest(bar)
 
-        if bar.close > breakout_high:
+        is_break_above = (
+            bar.close > breakout_high if self.breakout_trigger == "close"
+            else bar.high > breakout_high
+        )
+        is_break_below = (
+            bar.close < breakout_low if self.breakout_trigger == "close"
+            else bar.low < breakout_low
+        )
+
+        if is_break_above:
             if self.wait_for_retest:
                 self._retest_pending = Direction.LONG
                 logger.info("Breakout above %.2f — waiting for retest", breakout_high)
                 return None
             return self._enter_trade(bar, Direction.LONG)
 
-        if bar.close < breakout_low:
+        if is_break_below:
             if self.wait_for_retest:
                 self._retest_pending = Direction.SHORT
                 logger.info("Breakout below %.2f — waiting for retest", breakout_low)
@@ -218,11 +286,7 @@ class ORBStrategy:
 
         logger.info(
             "ENTRY %s @ %.2f | SL: %.2f | TP: %.2f | Risk: %.2f pts",
-            direction.value,
-            entry_price,
-            stop_loss,
-            profit_target,
-            risk,
+            direction.value, entry_price, stop_loss, profit_target, risk,
         )
         return trade
 
@@ -297,11 +361,8 @@ class ORBStrategy:
 
         logger.info(
             "EXIT %s @ %.2f | Reason: %s | PnL: %.2f pts ($%.2f)",
-            trade.direction.value,
-            exit_price,
-            reason,
-            trade.pnl_points,
-            trade.pnl_dollars,
+            trade.direction.value, exit_price, reason,
+            trade.pnl_points, trade.pnl_dollars,
         )
 
         self.current_trade = None
